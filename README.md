@@ -141,4 +141,4 @@ This version is single-user on purpose: every user's weekly run is real Claude A
 
 ## Data source
 
-Postings come from the [SimplifyJobs Summer2027-Internships](https://github.com/SimplifyJobs/Summer2027-Internships) `listings.json`, read only. Each match links back to the original posting. This repo declares no license of its own.
+Postings come from the [SimplifyJobs Summer2027-Internships](https://github.com/SimplifyJobs/Summer2027-Internships) `listings.json`, read only. Each match links back to the original posting. The feed has its own terms; this repo's MIT license (see `LICENSE`) covers only the code here.
