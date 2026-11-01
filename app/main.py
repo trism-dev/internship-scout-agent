@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.db import apply_schema, connect
+from app.demo_data import RESUME, SAMPLES
 
 MAX_RESUME = 50_000
 
@@ -75,6 +76,7 @@ document.addEventListener('click', async (e) => {
 """
 
 JS_HASH = base64.b64encode(hashlib.sha256(JS.encode()).digest()).decode()
+DEMO_CSP = "default-src 'none'; style-src 'unsafe-inline'"
 CSP = (
     f"default-src 'none'; script-src 'sha256-{JS_HASH}'; style-src 'unsafe-inline'; "
     "connect-src 'self'"
@@ -161,6 +163,21 @@ def table_row(m):
     )
 
 
+def layout(body):
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Internship Scout</title>
+<style>{CSS}</style>
+</head>
+<body>
+{body}
+</body>
+</html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     with connect() as conn:
@@ -182,21 +199,34 @@ def index():
         )
     else:
         matches = "<p>No matches yet.</p>"
-    page = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Internship Scout</title>
-<style>{CSS}</style>
-</head>
-<body>
-<h1>Internship Scout</h1>
+    body = f"""<h1>Internship Scout</h1>
 {stats}
+<p>This table is the owner's real run. <a href="/demo">See a full example with sample data.</a></p>
 <h2>Top matches</h2>
 {matches}
 <p><label>API token to explain a match <input id="token" type="password" autocomplete="off"></label></p>
-<script>{JS}</script>
-</body>
-</html>"""
-    return HTMLResponse(page, headers={"Content-Security-Policy": CSP})
+<script>{JS}</script>"""
+    return HTMLResponse(layout(body), headers={"Content-Security-Policy": CSP})
+
+
+def demo_match(company, title, score, summary, reasons, gaps):
+    reason_items = "".join(f"<li>{escape(a)}: {escape(b)}</li>" for a, b in reasons)
+    reasons_html = f"<ul>{reason_items}</ul>" if reasons else "<p>No matching requirements.</p>"
+    gap_items = "".join(f"<li>{escape(g)}</li>" for g in gaps)
+    gaps_html = f"<p>Gaps</p><ul>{gap_items}</ul>" if gaps else ""
+    return (
+        f"<section class=\"x\"><h3>{escape(company)}: {escape(title)} ({score})</h3>"
+        f"<p>{escape(summary)}</p>{reasons_html}{gaps_html}</section>"
+    )
+
+
+@app.get("/demo", response_class=HTMLResponse)
+def demo():
+    body = f"""<h1>Internship Scout demo</h1>
+<p><strong>Sample data: fictional resume and companies.</strong> Nothing here comes from a real run.</p>
+<p><a href="/">Back to the live table</a></p>
+<h2>Sample resume</h2>
+<p>{escape(RESUME)}</p>
+<h2>Sample matches</h2>
+{"".join(demo_match(*s) for s in SAMPLES)}"""
+    return HTMLResponse(layout(body), headers={"Content-Security-Policy": DEMO_CSP})
