@@ -1,12 +1,15 @@
+import base64
+import hashlib
 import itertools
 import time
 from types import SimpleNamespace
 
+import psycopg
 import pytest
 import test_agent as ta
 from fastapi.testclient import TestClient
 
-from app import main
+from app import agent, main
 from app.main import app
 
 TOKEN = "tok"
@@ -50,10 +53,10 @@ def add_match(db, resume_id, title="Intern", url="https://example.com/p", score=
 
 def feed(*ids):
     return [
-        {"id": i, "active": True, "company_name": "Acme", "title": f"T{i}", "date_posted": time.time(),
+        {"id": i, "active": True, "company_name": "Acme", "title": f"T{i}", "date_posted": time.time() - n,
          "url": f"https://example.com/{i}", "locations": [], "terms": [], "category": "SWE",
          "sponsorship": "Other"}
-        for i in ids
+        for n, i in enumerate(ids)
     ]  # fmt: skip
 
 
@@ -78,21 +81,27 @@ def test_auth_required(client, monkeypatch, method, path, kw):
         assert client.request(method, path, headers={"Authorization": "Bearer "}, **kw).status_code == 503
 
 
-def test_resume_saved_latest_wins_and_not_echoed(client, db):
-    r = client.put("/resume", json={"text": "  Fictional Person  "}, headers=AUTH)
-    assert r.status_code == 200 and r.json() == {"id": 1}
-    client.put("/resume", json={"text": "second resume"}, headers=AUTH)
+def test_resume_saved_latest_wins_and_not_echoed(client, db, monkeypatch):
+    r1 = client.put("/resume", json={"text": "  Fictional Person  "}, headers=AUTH)
+    r2 = client.put("/resume", json={"text": "second resume"}, headers=AUTH)
+    assert (r1.status_code, r1.json()) == (200, {"id": 1})
+    assert (r2.status_code, r2.json()) == (200, {"id": 2})
+    assert "Fictional" not in r1.text + r2.text
     assert db.execute("SELECT text FROM resumes ORDER BY id").fetchall() == [
         {"text": "Fictional Person"},
         {"text": "second resume"},
     ]
-    assert "Fictional" not in r.text
+    monkeypatch.setattr(main, "fetch_listings", lambda: feed("a"))
+    reqs = use_anthropic(monkeypatch, ta.msg([ta.rec(1)]), ta.end())
+    client.post("/runs", headers=AUTH)
+    assert "second resume" in reqs[0]["system"] and "Fictional" not in reqs[0]["system"]
+    assert db.execute("SELECT resume_id FROM matches").fetchone()["resume_id"] == 2
 
 
-@pytest.mark.parametrize("text", ["", "   ", "x" * 50_001, "a\x00b"])
+@pytest.mark.parametrize("text", ["", "   ", "MARKER" + "x" * 50_001, "MARKER\x00"])
 def test_resume_validation(client, db, text):
     r = client.put("/resume", json={"text": text}, headers=AUTH)
-    assert r.status_code == 422 and (not text.strip() or text[:5] not in r.text)
+    assert r.status_code == 422 and "MARKER" not in r.text
     assert db.execute("SELECT count(*) AS n FROM resumes").fetchone()["n"] == 0
 
 
@@ -115,9 +124,11 @@ def test_full_run_then_rerun_scores_nothing_twice(client, db, monkeypatch):
     r = client.post("/runs", headers=AUTH)
     assert r.status_code == 202 and r.json() == {"run_id": 1}
     assert "Fictional" in reqs[0]["system"]
-    assert client.get("/runs/latest").json() | {"started_at": 0, "finished_at": 0} == {
-        "started_at": 0, "finished_at": 0, "status": "succeeded", "postings_fetched": 2,
-        "postings_new": 2, "postings_scored": 2, "input_tokens": 20, "output_tokens": 10,
+    latest = client.get("/runs/latest").json()
+    assert latest.pop("started_at") and latest.pop("finished_at")
+    assert latest == {
+        "status": "succeeded", "postings_fetched": 2, "postings_new": 2, "postings_scored": 2,
+        "input_tokens": 20, "output_tokens": 10,
     }  # fmt: skip
     assert db.execute("SELECT finished_at FROM runs").fetchone()["finished_at"] is not None
 
@@ -129,12 +140,59 @@ def test_full_run_then_rerun_scores_nothing_twice(client, db, monkeypatch):
     assert db.execute("SELECT count(*) AS n FROM matches").fetchone()["n"] == 2
 
 
-def test_failed_batches_still_succeed(client, db, monkeypatch):
+def test_all_batches_failed_is_failed_but_partial_is_succeeded(client, db, monkeypatch):
     add_resume(db)
     monkeypatch.setattr(main, "fetch_listings", lambda: feed("a"))
     use_anthropic(monkeypatch, ta.msg([], "refusal"))
     client.post("/runs", headers=AUTH)
-    assert client.get("/runs/latest").json()["status"] == "succeeded"
+    row = db.execute("SELECT status, error, finished_at FROM runs").fetchone()
+    assert (row["status"], row["error"]) == ("failed", "AllBatchesFailed") and row["finished_at"]
+
+    monkeypatch.setattr(agent, "BATCH_SIZE", 1)
+    monkeypatch.setattr(main, "fetch_listings", lambda: feed("a", "b"))
+    use_anthropic(monkeypatch, ta.msg([ta.rec(1)]), ta.end(), ta.msg([], "refusal"))
+    client.post("/runs", headers=AUTH)
+    row = db.execute("SELECT status, error, postings_scored FROM runs ORDER BY id DESC").fetchone()
+    assert (row["status"], row["error"], row["postings_scored"]) == ("succeeded", None, 1)
+
+
+def test_failure_write_failing_does_not_raise(db, monkeypatch):
+    add_resume(db)
+    db.execute("INSERT INTO runs DEFAULT VALUES")
+    real, calls = main.connect, []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) > 1:
+            raise psycopg.OperationalError("down")
+        return real()
+
+    def boom():
+        raise RuntimeError
+
+    monkeypatch.setattr(main, "connect", flaky)
+    monkeypatch.setattr(main, "fetch_listings", boom)
+    main.run_pipeline(1)
+    assert len(calls) == 2
+    assert db.execute("SELECT status FROM runs").fetchone()["status"] == "running"
+
+
+def test_stale_running_row_is_failed_and_new_run_starts(client, db, monkeypatch):
+    add_resume(db)
+    db.execute("INSERT INTO runs (started_at) VALUES (now() - interval '7 hours')")
+    monkeypatch.setattr(main, "fetch_listings", list)
+    use_anthropic(monkeypatch)
+    r = client.post("/runs", headers=AUTH)
+    assert r.status_code == 202 and r.json() == {"run_id": 2}
+    old = db.execute("SELECT status, error, finished_at FROM runs WHERE id = 1").fetchone()
+    assert (old["status"], old["error"]) == ("failed", "stale") and old["finished_at"]
+
+
+def test_recent_running_row_is_not_stale(client, db):
+    add_resume(db)
+    db.execute("INSERT INTO runs (started_at) VALUES (now() - interval '5 hours')")
+    assert client.post("/runs", headers=AUTH).status_code == 409
+    assert db.execute("SELECT status FROM runs").fetchone()["status"] == "running"
 
 
 def test_pipeline_failure_stores_only_class_name(client, db, monkeypatch):
@@ -162,10 +220,13 @@ def test_startup_marks_leftover_running_failed(db):
 def test_latest_run_404_and_fields(client, db):
     assert client.get("/runs/latest").status_code == 404
     db.execute("INSERT INTO runs (status, error) VALUES ('failed', 'X')")
-    assert set(client.get("/runs/latest").json()) == {
+    db.execute("UPDATE runs SET finished_at = now()")
+    body = client.get("/runs/latest").json()
+    assert set(body) == {
         "started_at", "finished_at", "status", "postings_fetched", "postings_new",
         "postings_scored", "input_tokens", "output_tokens",
     }  # fmt: skip
+    assert body["started_at"] and body["finished_at"]
 
 
 def test_matches_filter_order_and_latest_resume_only(client, db):
@@ -207,7 +268,12 @@ def test_page_public_view(client, db):
     add_match(db, rid, title="Rust Intern", score=77)
     db.execute("INSERT INTO runs (status, finished_at, postings_scored) VALUES ('succeeded', now(), 1)")
     r = client.get("/")
-    assert r.headers["content-security-policy"] == main.CSP
+    csp = r.headers["content-security-policy"]
+    script_src = next(d for d in csp.split("; ") if d.startswith("script-src"))
+    assert "unsafe-inline" not in script_src and f"'sha256-{main.JS_HASH}'" in script_src
+    body = r.text.split("<script>", 1)[1].split("</script>", 1)[0]
+    digest = hashlib.sha256(body.encode()).digest()
+    assert base64.b64encode(digest).decode() == main.JS_HASH
     for shown in ("Acme", "Rust Intern", "77", "succeeded", 'href="https://example.com/p"'):
         assert shown in r.text
     for hidden in ("SUMMARY-TEXT", "EVIDENCE-TEXT", "GAP-TEXT"):

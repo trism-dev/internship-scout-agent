@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import hmac
 import logging
 import os
@@ -37,11 +39,6 @@ SELECT m.score, m.summary, m.reasons, m.gaps, m.model, m.scored_at,
        p.company, p.title, p.locations, p.url
 FROM matches m JOIN postings p ON p.id = m.posting_id WHERE m.id = %s
 """
-
-CSP = (
-    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-    "connect-src 'self'"
-)
 
 CSS = """
 :root { color-scheme: light dark; }
@@ -83,6 +80,12 @@ document.addEventListener('click', async (e) => {
 });
 """
 
+JS_HASH = base64.b64encode(hashlib.sha256(JS.encode()).digest()).decode()
+CSP = (
+    f"default-src 'none'; script-src 'sha256-{JS_HASH}'; style-src 'unsafe-inline'; "
+    "connect-src 'self'"
+)
+
 
 @asynccontextmanager
 async def lifespan(app):
@@ -118,21 +121,27 @@ def run_pipeline(run_id):
             )
             if out["failed_batches"] or out["unscored"]:
                 log.warning("run %s: %s", run_id, out)
+            dead = out["failed_batches"] and not out["scored"]
             conn.execute(
-                "UPDATE runs SET status = 'succeeded', finished_at = now(), postings_fetched = %s,"
-                " postings_new = %s, postings_scored = %s, input_tokens = %s, output_tokens = %s"
-                " WHERE id = %s",
-                (len(postings), new, out["scored"], out["input_tokens"], out["output_tokens"],
+                "UPDATE runs SET status = %s, error = %s, finished_at = now(),"
+                " postings_fetched = %s, postings_new = %s, postings_scored = %s,"
+                " input_tokens = %s, output_tokens = %s WHERE id = %s",
+                ("failed" if dead else "succeeded", "AllBatchesFailed" if dead else None,
+                 len(postings), new, out["scored"], out["input_tokens"], out["output_tokens"],
                  run_id),
             )  # fmt: skip
 
     except Exception as e:
         log.exception("run %s failed", run_id)
-        with connect() as conn:
-            conn.execute(
-                "UPDATE runs SET status = 'failed', finished_at = now(), error = %s WHERE id = %s",
-                (type(e).__name__, run_id),
-            )
+        try:
+            with connect() as conn:
+                conn.execute(
+                    "UPDATE runs SET status = 'failed', finished_at = now(), error = %s"
+                    " WHERE id = %s",
+                    (type(e).__name__, run_id),
+                )
+        except psycopg.Error:
+            log.exception("run %s: could not record failure", run_id)
 
 
 class ResumeIn(BaseModel):
@@ -164,6 +173,10 @@ def start_run(tasks: BackgroundTasks):
     with connect() as conn:
         if not conn.execute("SELECT 1 FROM resumes LIMIT 1").fetchone():
             raise HTTPException(409, "no resume")
+        conn.execute(
+            "UPDATE runs SET status = 'failed', finished_at = now(), error = 'stale'"
+            " WHERE status = 'running' AND started_at < now() - interval '6 hours'"
+        )
         try:
             run_id = conn.execute("INSERT INTO runs DEFAULT VALUES RETURNING id").fetchone()["id"]
         except psycopg.errors.UniqueViolation:
@@ -216,7 +229,7 @@ def index():
         run = latest_run(conn)
         top = conn.execute(MATCHES, (0, 10)).fetchall()
     if run:
-        done = run["finished_at"].strftime("%Y-%m-%d %H:%M UTC") if run["finished_at"] else "not yet"
+        done = run["finished_at"].astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC") if run["finished_at"] else "not yet"
         stats = (
             f"<p>Last run: {escape(run['status'])}, finished {done}, "
             f"{run['postings_scored']} postings scored.</p>"
