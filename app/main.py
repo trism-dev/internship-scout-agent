@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from html import escape
 
 import anthropic
+import httpx
 import psycopg
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -15,6 +16,7 @@ from pydantic import BaseModel
 
 from app.agent import score_postings
 from app.db import apply_schema, connect
+from app.digest import deliver
 from app.feed import fetch_listings, parse_listings, upsert_postings
 
 logging.basicConfig(level=logging.INFO)
@@ -130,7 +132,14 @@ def run_pipeline(run_id):
                  len(postings), new, out["scored"], out["input_tokens"], out["output_tokens"],
                  run_id),
             )  # fmt: skip
-
+            conn.commit()
+            if not dead:
+                try:
+                    if deliver(conn, resume["id"], out["scored"]):
+                        conn.execute("UPDATE runs SET digest_sent = true WHERE id = %s", (run_id,))
+                except (httpx.HTTPError, psycopg.Error) as e:  # a digest failure must not fail the run
+                    conn.rollback()
+                    log.error("run %s: digest failed: %s", run_id, type(e).__name__)
     except Exception as e:
         log.exception("run %s failed", run_id)
         try:
