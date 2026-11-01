@@ -25,12 +25,12 @@ flowchart LR
 
 Each week GitHub Actions runs `python -m app.run`. The job downloads the feed and stores new postings in Postgres. It then sends the unscored postings, 25 at a time, to Claude along with your resume. Claude has two tools: `get_posting_details` fetches a posting's description, and `record_match` saves a score from 0 to 100 with reasons and gaps. Matches scoring 70 or more that have not been emailed yet (at most 15) go into one HTML digest. Code sends the email, not the model. The FastAPI app on Vercel only reads the same database to serve the API and the public page, and takes the resume upload.
 
-The scorer's tests use a mocked API. No real scoring run has happened yet, so I make no claim about scoring quality, cost per run, or how many postings a week this finds.
+The scorer's tests use a mocked API. The first real run (1 Nov 2026, `claude-haiku-5-5`) scored all 585 active postings in the feed in 16 minutes, using 722,652 input and 240,066 output tokens, and sent the digest. That first run scores the whole feed; later weekly runs score only new postings. Some career sites block description fetches (HTTP 403), so those postings are scored from title, company and location alone. Scores are the model's judgment, not checked against a labelled set, so I make no accuracy claim.
 
 ## Design choices
 
 - **Tool calling.** The feed has no descriptions. With tools, the model asks for a description only for postings that look promising, instead of one huge prompt with everything.
-- **Cheapest model by default.** `SCOUT_MODEL` defaults to `claude-haiku-5-5`. Change the variable if the first real run scores poorly.
+- **Cheapest model by default.** `SCOUT_MODEL` defaults to `claude-haiku-5-5`. The first real run's top matches and explanations held up on a read-through, so it stays the default; change the variable if yours score poorly.
 - **Manual loop.** The agent loop is a plain loop over the Messages API with a turn limit, so there is no beta helper to break on an SDK upgrade.
 - **Plain SQL.** psycopg and one `schema.sql` applied at startup. No ORM or migration tool until a second schema change needs one.
 - **Posting text is untrusted.** The model can only name a posting by ID from this database, never a URL. Description fetches accept public IPs over https only, with redirect and size limits, and text is capped. Tools can only read a posting and save a score, and output is HTML-escaped. A hostile posting could still try to skew its own score; nothing here prevents that.
