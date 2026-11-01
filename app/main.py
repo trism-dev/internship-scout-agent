@@ -31,7 +31,7 @@ RUN_COLUMNS = (
 MATCHES = """
 SELECT m.id, m.score, m.summary, p.company, p.title, p.url
 FROM matches m JOIN postings p ON p.id = m.posting_id
-WHERE m.resume_id = (SELECT max(id) FROM resumes) AND m.score >= %s
+WHERE m.resume_id = (SELECT max(id) FROM resumes) AND m.score >= %s AND p.active
 ORDER BY m.score DESC, m.id LIMIT %s
 """
 
@@ -45,6 +45,7 @@ CSS = """
 :root { color-scheme: light dark; }
 body { font: 16px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 0 auto; padding: 0 16px 2rem; }
 table { border-collapse: collapse; width: 100%; }
+th { white-space: nowrap; }
 th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #8884; vertical-align: top;
          overflow-wrap: anywhere; }
 input { font: inherit; max-width: 100%; }
