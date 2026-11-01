@@ -4,6 +4,7 @@ import itertools
 import time
 from types import SimpleNamespace
 
+import httpx
 import psycopg
 import pytest
 import test_agent as ta
@@ -26,6 +27,13 @@ PROTECTED = [
 @pytest.fixture(autouse=True)
 def token(monkeypatch):
     monkeypatch.setenv("API_TOKEN", TOKEN)
+
+
+@pytest.fixture(autouse=True)
+def no_digest(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "deliver", lambda *a: calls.append(a) or False)
+    return calls
 
 
 @pytest.fixture
@@ -128,7 +136,7 @@ def test_full_run_then_rerun_scores_nothing_twice(client, db, monkeypatch):
     assert latest.pop("started_at") and latest.pop("finished_at")
     assert latest == {
         "status": "succeeded", "postings_fetched": 2, "postings_new": 2, "postings_scored": 2,
-        "input_tokens": 20, "output_tokens": 10,
+        "input_tokens": 20, "output_tokens": 10, "digest_sent": False,
     }  # fmt: skip
     assert db.execute("SELECT finished_at FROM runs").fetchone()["finished_at"] is not None
 
@@ -154,6 +162,44 @@ def test_all_batches_failed_is_failed_but_partial_is_succeeded(client, db, monke
     client.post("/runs", headers=AUTH)
     row = db.execute("SELECT status, error, postings_scored FROM runs ORDER BY id DESC").fetchone()
     assert (row["status"], row["error"], row["postings_scored"]) == ("succeeded", None, 1)
+
+
+def run_once(client, db, monkeypatch, *responses):
+    add_resume(db)
+    monkeypatch.setattr(main, "fetch_listings", lambda: feed("a"))
+    use_anthropic(monkeypatch, *responses)
+    client.post("/runs", headers=AUTH)
+    return db.execute("SELECT status, digest_sent FROM runs").fetchone()
+
+
+def test_digest_sent_flag_set_on_success(client, db, monkeypatch, no_digest):
+    monkeypatch.setattr(main, "deliver", lambda *a: no_digest.append(a) or True)
+    row = run_once(client, db, monkeypatch, ta.msg([ta.rec(1)]), ta.end())
+    assert (row["status"], row["digest_sent"]) == ("succeeded", True)
+    assert no_digest[0][1:] == (1, 1)
+
+
+def test_digest_failure_keeps_run_succeeded(client, db, monkeypatch):
+    def boom(*a):
+        raise httpx.ConnectError("sk-secret-value")
+
+    monkeypatch.setattr(main, "deliver", boom)
+    row = run_once(client, db, monkeypatch, ta.msg([ta.rec(1)]), ta.end())
+    assert (row["status"], row["digest_sent"]) == ("succeeded", False)
+
+
+def test_any_digest_error_keeps_run_succeeded(client, db, monkeypatch):
+    def boom(*a):
+        raise OSError("secret")
+
+    monkeypatch.setattr(main, "deliver", boom)
+    row = run_once(client, db, monkeypatch, ta.msg([ta.rec(1)]), ta.end())
+    assert (row["status"], row["digest_sent"]) == ("succeeded", False)
+
+
+def test_failed_run_does_not_deliver(client, db, monkeypatch, no_digest):
+    row = run_once(client, db, monkeypatch, ta.msg([], "refusal"))
+    assert row["status"] == "failed" and no_digest == []
 
 
 def test_failure_write_failing_does_not_raise(db, monkeypatch):
@@ -224,7 +270,7 @@ def test_latest_run_404_and_fields(client, db):
     body = client.get("/runs/latest").json()
     assert set(body) == {
         "started_at", "finished_at", "status", "postings_fetched", "postings_new",
-        "postings_scored", "input_tokens", "output_tokens",
+        "postings_scored", "input_tokens", "output_tokens", "digest_sent",
     }  # fmt: skip
     assert body["started_at"] and body["finished_at"]
 

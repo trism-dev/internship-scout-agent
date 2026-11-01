@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from html import escape
 
@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from app.agent import score_postings
 from app.db import apply_schema, connect
+from app.digest import deliver
 from app.feed import fetch_listings, parse_listings, upsert_postings
 
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +25,7 @@ MAX_RESUME = 50_000
 
 RUN_COLUMNS = (
     "started_at, finished_at, status, postings_fetched, postings_new, postings_scored,"
-    " input_tokens, output_tokens"
+    " input_tokens, output_tokens, digest_sent"
 )
 
 MATCHES = """
@@ -130,7 +131,15 @@ def run_pipeline(run_id):
                  len(postings), new, out["scored"], out["input_tokens"], out["output_tokens"],
                  run_id),
             )  # fmt: skip
-
+            conn.commit()
+            if not dead:
+                try:
+                    if deliver(conn, resume["id"], out["scored"]):
+                        conn.execute("UPDATE runs SET digest_sent = true WHERE id = %s", (run_id,))
+                except Exception as e:  # noqa: BLE001 - nothing from the digest may fail a succeeded run
+                    with suppress(psycopg.Error):
+                        conn.rollback()
+                    log.error("run %s: digest failed: %s", run_id, type(e).__name__)
     except Exception as e:
         log.exception("run %s failed", run_id)
         try:
