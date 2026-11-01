@@ -63,7 +63,7 @@ def test_hostile_entries_do_not_abort_upsert(db):
         entry("good"),
         entry("nul", title="a\x00b"),
         entry("nulloc", locations=["x\x00"]),
-        entry("surrogate", company="\ud800"),
+        entry("surrogate", company_name="\ud800"),
         entry("nan", terms=[float("nan")]),
         entry("inf", locations=[float("inf")]),
         entry("nulgone\x00", active=False),

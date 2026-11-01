@@ -33,7 +33,7 @@ def fetch_listings(client=None):
 def _check(x):
     text = json.dumps(x, ensure_ascii=False, allow_nan=False)
     text.encode()
-    if "\u0000" in text:
+    if chr(92) + "u0000" in text:
         raise ValueError("NUL")
 
 
