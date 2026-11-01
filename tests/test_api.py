@@ -177,3 +177,11 @@ def test_inactive_posting_leaves_page_and_matches_but_detail_stays(client, db):
     assert client.get("/matches", headers=AUTH).json() == []
     assert "Removed Intern" not in client.get("/").text
     assert client.get(f"/matches/{mid}", headers=AUTH).status_code == 200
+
+
+def test_demo_page_is_public_and_needs_no_database():
+    r = TestClient(app).get("/demo")  # no token, no db fixture
+    assert r.status_code == 200
+    assert "Sample data" in r.text and "Example Robotics" in r.text
+    assert "Python and data pipelines" in r.text and "Telemetry dashboard project in Python" in r.text
+    assert "<script" not in r.text and "script-src" not in r.headers["content-security-policy"]
