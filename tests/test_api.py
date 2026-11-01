@@ -179,9 +179,15 @@ def test_inactive_posting_leaves_page_and_matches_but_detail_stays(client, db):
     assert client.get(f"/matches/{mid}", headers=AUTH).status_code == 200
 
 
-def test_demo_page_is_public_and_needs_no_database():
+def test_demo_page_is_public_and_needs_no_database(monkeypatch):
+    def no_db(*a, **kw):
+        pytest.fail("/demo touched the database")
+
+    monkeypatch.setattr(main, "connect", no_db)
     r = TestClient(app).get("/demo")  # no token, no db fixture
     assert r.status_code == 200
     assert "Sample data" in r.text and "Example Robotics" in r.text
     assert "Python and data pipelines" in r.text and "Telemetry dashboard project in Python" in r.text
-    assert "<script" not in r.text and "script-src" not in r.headers["content-security-policy"]
+    csp = r.headers["content-security-policy"]
+    assert "default-src 'none'" in csp and "script-src" not in csp
+    assert "<script" not in r.text
