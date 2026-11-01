@@ -2,12 +2,13 @@
 
 A weekly agent that pulls new internship postings from a public feed, scores each one against your resume using Claude with tool calling, explains every match, and emails a digest of the best ones.
 
-Live: deploy pending.
-<!-- Replace the line above with the real URL after the Vercel deploy. -->
+Live: https://internship-scout-agent.vercel.app (my own instance). Full example with sample data: [/demo](https://internship-scout-agent.vercel.app/demo).
+
+Each instance serves one person: one resume, one set of keys, one digest. To use it yourself, run your own copy on free tiers with your own keys (see [Run your own copy](#run-your-own-copy)). [Scaling to multiple users](#scaling-to-multiple-users) explains what a shared, multi-user version would need and why this one stays single-user.
 
 ![Demo of the public page: explaining two matches](docs/demo.gif)
 
-The GIF shows sample data at fictional companies (Example Robotics, Sample Labs and so on). It is not output from a real run. Re-record it against a deployed instance with `--live` (see Deploy).
+The GIF shows sample data at fictional companies (Example Robotics, Sample Labs and so on). It is not output from a real run. Re-record it against a deployed instance with `--live` (see Run your own copy).
 
 ## How it works
 
@@ -82,6 +83,7 @@ Without `RESEND_API_KEY`, `DIGEST_FROM` and `DIGEST_TO`, or with `DIGEST_DRY_RUN
 |---|---|---|
 | `GET /health` | none | Database check |
 | `GET /` | none | Public page: last run and top 10 matches |
+| `GET /demo` | none | Sample resume and matches with full explanations, fictional data, no database |
 | `GET /runs/latest` | none | Status and counts of the latest run |
 | `PUT /resume` | bearer | Store a resume, `{"text": "..."}`, up to 50000 characters |
 | `GET /matches` | bearer | List matches, query `min_score` (0 to 100) and `limit` (1 to 200) |
@@ -114,16 +116,28 @@ CI runs the same against a Postgres service.
 | `DIGEST_DRY_RUN` | If set, write the digest to a file instead of sending | `.env` |
 | `SCOUT_ENABLED` | Set to `true` to let `weekly.yml` run | GitHub variable |
 
-## Deploy
+## Run your own copy
 
-No Vercel or Neon deploy has happened yet. The app runs on Neon (Postgres) and Vercel (API and page), and GitHub Actions runs the weekly scoring job. Steps:
+Your copy runs on Neon (Postgres), Vercel (API and page) and GitHub Actions (the weekly scoring job), all on free plans. You pay only for Claude API usage. You need accounts at GitHub, Neon, Vercel, Anthropic (with API credit) and, for the email digest, Resend. If a coding agent is doing the setup for you, give it this section: steps that need your accounts or keys are yours to do by hand, and keys never go in a file in the repo.
 
-1. Create a Neon project on the free plan. Copy both connection strings: the pooled one (the host contains `-pooler`) and the direct one.
-2. Import this repo in Vercel on the Hobby plan. Hobby is for personal, non-commercial use ([terms](https://vercel.com/docs/plans/hobby)). Set the Framework Preset to FastAPI. Vercel finds `app/main.py` and installs the dependencies from `pyproject.toml`, not `requirements.txt`; a test keeps the two lists equal. Set `DATABASE_URL` to the pooled string and set `API_TOKEN`. The scoring keys are not needed on Vercel.
-3. Upload your resume with `PUT /resume`. Never commit it; `resume*` files are gitignored.
-4. In the GitHub repo add the secrets `DATABASE_URL` (the direct string), `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `DIGEST_FROM` and `DIGEST_TO`, and the variable `SCOUT_ENABLED` set to `true`. `weekly.yml` then runs every Monday at 13:00 UTC. It does nothing while `SCOUT_ENABLED` is unset. Start the first run by hand with `gh workflow run weekly.yml`. A job that is cancelled or times out leaves its run marked as running, which blocks new runs until the 4 hour stale check clears it.
-5. Replace "Live: deploy pending." above with the Vercel URL.
-6. Optionally re-record the GIF from the real site: `python scripts/record_demo.py --live --url https://your-url`. It records only the public table, with no token and no Explain click, because explanations quote your resume. This needs `pip install playwright pillow` and an installed Edge or Chrome (`--channel chrome`). Without `--live` it seeds fictional sample data into a local database at `DATABASE_URL` (it refuses any other host or a database with real data) and captions the frames "Sample data".
+1. Fork this repo. GitHub turns Actions off on a fork until you open its Actions tab and enable workflows.
+2. Create a Neon project on the free plan. Copy both connection strings: the pooled one (the host contains `-pooler`) and the direct one.
+3. Import your fork in Vercel on the Hobby plan. Hobby is for personal, non-commercial use ([terms](https://vercel.com/docs/plans/hobby)). Set the Framework Preset to FastAPI. Vercel finds `app/main.py` and installs the dependencies from `pyproject.toml`, not `requirements.txt`; a test keeps the two lists equal. Set `DATABASE_URL` to the pooled string and `API_TOKEN` to a long random string. The scoring keys are not needed on Vercel. After the deploy, `https://your-url/health` should return `{"status":"ok"}`.
+4. Upload your resume as plain text with `PUT /resume` (the `jq` and `curl` command under Run locally, with your Vercel URL in place of `localhost:8000`). Never commit it; `resume*` files are gitignored.
+5. In your fork add the secrets `DATABASE_URL` (the direct string), `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `DIGEST_FROM` and `DIGEST_TO`, and the variable `SCOUT_ENABLED` set to `true`. `weekly.yml` then runs every Monday at 13:00 UTC. It does nothing while `SCOUT_ENABLED` is unset. Start the first run by hand with `gh workflow run weekly.yml`. A job that is cancelled or times out leaves its run marked as running, which blocks new runs until the 4 hour stale check clears it. The email secrets are optional: without all three, the digest is skipped and matches are only on the site and API. Resend's test sender `onboarding@resend.dev` delivers only to your own Resend account address; to send elsewhere, verify a domain in Resend.
+6. Read the results with `GET /runs/latest` and `GET /matches` (see API).
+7. Optionally re-record the GIF from the real site: `python scripts/record_demo.py --live --url https://your-url`. It records only the public table, with no token and no Explain click, because explanations quote your resume. This needs `pip install playwright pillow` and an installed Edge or Chrome (`--channel chrome`). Without `--live` it seeds fictional sample data into a local database at `DATABASE_URL` (it refuses any other host or a database with real data) and captions the frames "Sample data".
+
+## Scaling to multiple users
+
+This version is single-user on purpose: every user's weekly run is real Claude API spend, and a personal project should not carry other people's costs. A shared version would need:
+
+- **Sign-in.** Email magic links sent through Resend from a verified domain, with a `users` table and a session cookie in place of the single bearer token.
+- **Per-user data.** A `user_id` on resumes and runs. Matches are already keyed by resume, so scoring and the digest need no new logic, only a loop over users in the weekly job.
+- **Cost control.** A free keyword prefilter so Claude scores only each user's most likely postings, a per-user weekly cap, and a global token budget that stops runs when reached. `runs` already records token counts to enforce it.
+- **Abuse limits.** Rate limits on sign-in and resume upload, and a cap on users with a waitlist past it.
+- **Privacy.** Resumes are personal data: a delete-my-account endpoint that removes the resume and its matches, and a short privacy note.
+- **Hosting.** Vercel's Hobby plan is for non-commercial use only, so a shared service open to the public may need a paid plan.
 
 ## Data source
 
