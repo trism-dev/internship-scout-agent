@@ -119,7 +119,7 @@ CI runs the same against a Postgres service.
 No Vercel or Neon deploy has happened yet. The app runs on Neon (Postgres) and Vercel (API and page), and GitHub Actions runs the weekly scoring job. Steps:
 
 1. Create a Neon project on the free plan. Copy both connection strings: the pooled one (the host contains `-pooler`) and the direct one.
-2. Import this repo in Vercel on the Hobby plan. Hobby is for personal, non-commercial use ([terms](https://vercel.com/docs/plans/hobby)). Vercel finds `app/main.py` and installs `requirements.txt`. Set `DATABASE_URL` to the pooled string and set `API_TOKEN`. The scoring keys are not needed on Vercel.
+2. Import this repo in Vercel on the Hobby plan. Hobby is for personal, non-commercial use ([terms](https://vercel.com/docs/plans/hobby)). Set the Framework Preset to FastAPI. Vercel finds `app/main.py` and installs the dependencies from `pyproject.toml`, not `requirements.txt`; a test keeps the two lists equal. Set `DATABASE_URL` to the pooled string and set `API_TOKEN`. The scoring keys are not needed on Vercel.
 3. Upload your resume with `PUT /resume`. Never commit it; `resume*` files are gitignored.
 4. In the GitHub repo add the secrets `DATABASE_URL` (the direct string), `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `DIGEST_FROM` and `DIGEST_TO`, and the variable `SCOUT_ENABLED` set to `true`. `weekly.yml` then runs every Monday at 13:00 UTC. It does nothing while `SCOUT_ENABLED` is unset. Start the first run by hand with `gh workflow run weekly.yml`. A job that is cancelled or times out leaves its run marked as running, which blocks new runs until the 4 hour stale check clears it.
 5. Replace "Live: deploy pending." above with the Vercel URL.
