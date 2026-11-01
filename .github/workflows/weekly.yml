@@ -12,10 +12,11 @@ jobs:
   run:
     if: vars.SCOUT_URL != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Start a run
         env:
           SCOUT_URL: ${{ vars.SCOUT_URL }}
           API_TOKEN: ${{ secrets.API_TOKEN }}
         run: |
-          curl -fsS -X POST "$SCOUT_URL/runs" -H "Authorization: Bearer $API_TOKEN"
+          curl -fsS --max-time 60 -X POST "$SCOUT_URL/runs" -H "Authorization: Bearer $API_TOKEN"

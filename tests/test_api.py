@@ -136,7 +136,7 @@ def test_full_run_then_rerun_scores_nothing_twice(client, db, monkeypatch):
     assert latest.pop("started_at") and latest.pop("finished_at")
     assert latest == {
         "status": "succeeded", "postings_fetched": 2, "postings_new": 2, "postings_scored": 2,
-        "input_tokens": 20, "output_tokens": 10,
+        "input_tokens": 20, "output_tokens": 10, "digest_sent": False,
     }  # fmt: skip
     assert db.execute("SELECT finished_at FROM runs").fetchone()["finished_at"] is not None
 
@@ -182,6 +182,15 @@ def test_digest_sent_flag_set_on_success(client, db, monkeypatch, no_digest):
 def test_digest_failure_keeps_run_succeeded(client, db, monkeypatch):
     def boom(*a):
         raise httpx.ConnectError("sk-secret-value")
+
+    monkeypatch.setattr(main, "deliver", boom)
+    row = run_once(client, db, monkeypatch, ta.msg([ta.rec(1)]), ta.end())
+    assert (row["status"], row["digest_sent"]) == ("succeeded", False)
+
+
+def test_any_digest_error_keeps_run_succeeded(client, db, monkeypatch):
+    def boom(*a):
+        raise OSError("secret")
 
     monkeypatch.setattr(main, "deliver", boom)
     row = run_once(client, db, monkeypatch, ta.msg([ta.rec(1)]), ta.end())
@@ -261,7 +270,7 @@ def test_latest_run_404_and_fields(client, db):
     body = client.get("/runs/latest").json()
     assert set(body) == {
         "started_at", "finished_at", "status", "postings_fetched", "postings_new",
-        "postings_scored", "input_tokens", "output_tokens",
+        "postings_scored", "input_tokens", "output_tokens", "digest_sent",
     }  # fmt: skip
     assert body["started_at"] and body["finished_at"]
 

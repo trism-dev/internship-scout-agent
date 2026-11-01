@@ -96,18 +96,29 @@ def test_render_escapes_and_links_only_https():
     )
     assert "<script>" not in html and html.count("&lt;script&gt;alert(1)") >= 4
     assert 'href="https://x.com/p"' in html and "javascript:" not in html and 'href="http://' not in html
-    assert "3 new matches" in subject and "LLM estimates" in html and "42" in html
-    assert "88" in html and "Acme" in html and "R" in text and "E" in text
-    assert digest.render([row()], 1)[0] == "Internship Scout: 1 new match"
+    assert "Internship Scout: 3 matches" in subject and "LLM estimates" in html and "42" in html
+    assert "<b>88</b> &middot; Acme" in html and "88 - Acme - Plain" in text
+    assert "  + R: E" in text and "  - gap: G" in text
+    assert digest.render([row()], 1)[0] == "Internship Scout: 1 match"
+
+
+def test_href_quote_breakout_is_escaped():
+    _, html, _ = digest.render([row(url='https://x.com/"onmouseover="a')], 1)
+    assert 'href="https://x.com/&quot;onmouseover=&quot;a"' in html and '"onmouseover=' not in html
+
+
+def test_idempotency_key_stable_per_ids():
+    k = digest.idempotency_key([3, 1, 2])
+    assert k == digest.idempotency_key([1, 2, 3]) != digest.idempotency_key([1, 2, 4])
 
 
 def test_send_request_shape(monkeypatch):
     configured(monkeypatch)
     reqs = []
-    digest.send("subj", "<p>h</p>", "t", mail(reqs))
+    digest.send("subj", "<p>h</p>", "t", mail(reqs), "k1")
     r = reqs[0]
     assert (r.method, str(r.url)) == ("POST", "https://api.resend.com/emails")
-    assert r.headers["authorization"] == "Bearer re_test"
+    assert r.headers["authorization"] == "Bearer re_test" and r.headers["idempotency-key"] == "k1"
     assert json.loads(r.content) == {
         "from": "Scout <a@example.com>", "to": ["me@example.com"], "subject": "subj",
         "html": "<p>h</p>", "text": "t",
@@ -136,6 +147,7 @@ def test_deliver_marks_only_sent_ids_and_second_run_sends_nothing(db, monkeypatc
     reqs = []
     assert digest.deliver(db, rid, 3, mail(reqs)) is True
     assert digested(db) == [a, b] and skipped not in digested(db) and len(reqs) == 1
+    assert reqs[0].headers["idempotency-key"] == digest.idempotency_key([a, b])
     assert digest.deliver(db, rid, 3, mail(reqs)) is False
     assert len(reqs) == 1
 

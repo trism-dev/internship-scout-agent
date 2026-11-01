@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import tempfile
@@ -27,7 +28,7 @@ def select_matches(conn, resume_id):
 
 def render(matches, scored_count):
     n = len(matches)
-    subject = f"Internship Scout: {n} new match{'' if n == 1 else 'es'}"
+    subject = f"Internship Scout: {n} match{'' if n == 1 else 'es'}"
     cards, lines = [], []
     for m in matches:
         title = escape(m["title"])
@@ -58,10 +59,17 @@ def render(matches, scored_count):
     return subject, html, "\n".join([subject, "", *lines, stats])
 
 
-def send(subject, html, text, client=None):
+def idempotency_key(ids):
+    return "digest-" + hashlib.sha256(",".join(map(str, sorted(ids))).encode()).hexdigest()
+
+
+def send(subject, html, text, client=None, key=None):
+    headers = {"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}"}
+    if key:
+        headers["Idempotency-Key"] = key
     r = (client or httpx).post(
         "https://api.resend.com/emails",
-        headers={"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}"},
+        headers=headers,
         json={"from": os.environ["DIGEST_FROM"], "to": [os.environ["DIGEST_TO"]],
               "subject": subject, "html": html, "text": text},
         timeout=30,
@@ -80,12 +88,14 @@ def deliver(conn, resume_id, scored_count, client=None):
     ):
         path = Path(tempfile.gettempdir()) / f"internship-scout-digest-{date.today()}.html"
         path.write_text(html, encoding="utf-8")
-        log.info("digest not sent, wrote %s", path)
+        log.warning("digest not sent (missing config or dry run), wrote %s", path)
         return False
-    send(subject, html, text, client)
-    # ponytail: a crash between send and mark could repeat an email once
+    ids = [m["id"] for m in matches]
+    send(subject, html, text, client, idempotency_key(ids))
+    # ponytail: Resend honours the key for 24h, so a crash between send and mark
+    # could repeat an email once if the retry comes later
     conn.execute(
-        "UPDATE matches SET digested_at = now() WHERE id = ANY(%s)", ([m["id"] for m in matches],)
+        "UPDATE matches SET digested_at = now() WHERE id = ANY(%s)", (ids,)
     )
     conn.commit()
     return True
