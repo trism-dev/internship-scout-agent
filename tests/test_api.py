@@ -1,16 +1,11 @@
 import base64
 import hashlib
 import itertools
-import time
-from types import SimpleNamespace
 
-import httpx
-import psycopg
 import pytest
-import test_agent as ta
 from fastapi.testclient import TestClient
 
-from app import agent, main
+from app import main
 from app.main import app
 
 TOKEN = "tok"
@@ -18,7 +13,6 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 COUNT = itertools.count(1)
 PROTECTED = [
     ("PUT", "/resume", {"json": {"text": "x"}}),
-    ("POST", "/runs", {}),
     ("GET", "/matches", {}),
     ("GET", "/matches/1", {}),
 ]
@@ -27,13 +21,6 @@ PROTECTED = [
 @pytest.fixture(autouse=True)
 def token(monkeypatch):
     monkeypatch.setenv("API_TOKEN", TOKEN)
-
-
-@pytest.fixture(autouse=True)
-def no_digest(monkeypatch):
-    calls = []
-    monkeypatch.setattr(main, "deliver", lambda *a: calls.append(a) or False)
-    return calls
 
 
 @pytest.fixture
@@ -59,21 +46,6 @@ def add_match(db, resume_id, title="Intern", url="https://example.com/p", score=
     ).fetchone()["id"]
 
 
-def feed(*ids):
-    return [
-        {"id": i, "active": True, "company_name": "Acme", "title": f"T{i}", "date_posted": time.time() - n,
-         "url": f"https://example.com/{i}", "locations": [], "terms": [], "category": "SWE",
-         "sponsorship": "Other"}
-        for n, i in enumerate(ids)
-    ]  # fmt: skip
-
-
-def use_anthropic(monkeypatch, *responses):
-    c, reqs = ta.client(*responses)
-    monkeypatch.setattr(main, "anthropic", SimpleNamespace(Anthropic=lambda: c))
-    return reqs
-
-
 @pytest.mark.parametrize(("method", "path", "kw"), PROTECTED)
 def test_auth_required(client, monkeypatch, method, path, kw):
     assert client.request(method, path, **kw).status_code == 401
@@ -89,7 +61,7 @@ def test_auth_required(client, monkeypatch, method, path, kw):
         assert client.request(method, path, headers={"Authorization": "Bearer "}, **kw).status_code == 503
 
 
-def test_resume_saved_latest_wins_and_not_echoed(client, db, monkeypatch):
+def test_resume_saved_latest_wins_and_not_echoed(client, db):
     r1 = client.put("/resume", json={"text": "  Fictional Person  "}, headers=AUTH)
     r2 = client.put("/resume", json={"text": "second resume"}, headers=AUTH)
     assert (r1.status_code, r1.json()) == (200, {"id": 1})
@@ -99,11 +71,6 @@ def test_resume_saved_latest_wins_and_not_echoed(client, db, monkeypatch):
         {"text": "Fictional Person"},
         {"text": "second resume"},
     ]
-    monkeypatch.setattr(main, "fetch_listings", lambda: feed("a"))
-    reqs = use_anthropic(monkeypatch, ta.msg([ta.rec(1)]), ta.end())
-    client.post("/runs", headers=AUTH)
-    assert "second resume" in reqs[0]["system"] and "Fictional" not in reqs[0]["system"]
-    assert db.execute("SELECT resume_id FROM matches").fetchone()["resume_id"] == 2
 
 
 @pytest.mark.parametrize("text", ["", "   ", "MARKER" + "x" * 50_001, "MARKER\x00"])
@@ -117,150 +84,16 @@ def test_resume_max_length_accepted(client, db):
     assert client.put("/resume", json={"text": "x" * 50_000}, headers=AUTH).status_code == 200
 
 
-def test_run_conflicts(client, db):
-    assert client.post("/runs", headers=AUTH).status_code == 409
-    add_resume(db)
-    db.execute("INSERT INTO runs DEFAULT VALUES")
-    assert client.post("/runs", headers=AUTH).status_code == 409
-    assert db.execute("SELECT count(*) AS n FROM runs").fetchone()["n"] == 1
-
-
-def test_full_run_then_rerun_scores_nothing_twice(client, db, monkeypatch):
-    add_resume(db)
-    monkeypatch.setattr(main, "fetch_listings", lambda: feed("a", "b"))
-    reqs = use_anthropic(monkeypatch, ta.msg([ta.rec(1, 90), ta.rec(2, 40)], i=10, o=5), ta.end())
-    r = client.post("/runs", headers=AUTH)
-    assert r.status_code == 202 and r.json() == {"run_id": 1}
-    assert "Fictional" in reqs[0]["system"]
-    latest = client.get("/runs/latest").json()
-    assert latest.pop("started_at") and latest.pop("finished_at")
-    assert latest == {
-        "status": "succeeded", "postings_fetched": 2, "postings_new": 2, "postings_scored": 2,
-        "input_tokens": 20, "output_tokens": 10, "digest_sent": False,
-    }  # fmt: skip
-    assert db.execute("SELECT finished_at FROM runs").fetchone()["finished_at"] is not None
-
-    use_anthropic(monkeypatch)
-    client.post("/runs", headers=AUTH)
-    latest = client.get("/runs/latest").json()
-    assert (latest["postings_fetched"], latest["postings_new"], latest["postings_scored"]) == (2, 0, 0)
-    assert latest["input_tokens"] == 0 and latest["status"] == "succeeded"
-    assert db.execute("SELECT count(*) AS n FROM matches").fetchone()["n"] == 2
-
-
-def test_all_batches_failed_is_failed_but_partial_is_succeeded(client, db, monkeypatch):
-    add_resume(db)
-    monkeypatch.setattr(main, "fetch_listings", lambda: feed("a"))
-    use_anthropic(monkeypatch, ta.msg([], "refusal"))
-    client.post("/runs", headers=AUTH)
-    row = db.execute("SELECT status, error, finished_at FROM runs").fetchone()
-    assert (row["status"], row["error"]) == ("failed", "AllBatchesFailed") and row["finished_at"]
-
-    monkeypatch.setattr(agent, "BATCH_SIZE", 1)
-    monkeypatch.setattr(main, "fetch_listings", lambda: feed("a", "b"))
-    use_anthropic(monkeypatch, ta.msg([ta.rec(1)]), ta.end(), ta.msg([], "refusal"))
-    client.post("/runs", headers=AUTH)
-    row = db.execute("SELECT status, error, postings_scored FROM runs ORDER BY id DESC").fetchone()
-    assert (row["status"], row["error"], row["postings_scored"]) == ("succeeded", None, 1)
-
-
-def run_once(client, db, monkeypatch, *responses):
-    add_resume(db)
-    monkeypatch.setattr(main, "fetch_listings", lambda: feed("a"))
-    use_anthropic(monkeypatch, *responses)
-    client.post("/runs", headers=AUTH)
-    return db.execute("SELECT status, digest_sent FROM runs").fetchone()
-
-
-def test_digest_sent_flag_set_on_success(client, db, monkeypatch, no_digest):
-    monkeypatch.setattr(main, "deliver", lambda *a: no_digest.append(a) or True)
-    row = run_once(client, db, monkeypatch, ta.msg([ta.rec(1)]), ta.end())
-    assert (row["status"], row["digest_sent"]) == ("succeeded", True)
-    assert no_digest[0][1:] == (1, 1)
-
-
-def test_digest_failure_keeps_run_succeeded(client, db, monkeypatch):
-    def boom(*a):
-        raise httpx.ConnectError("sk-secret-value")
-
-    monkeypatch.setattr(main, "deliver", boom)
-    row = run_once(client, db, monkeypatch, ta.msg([ta.rec(1)]), ta.end())
-    assert (row["status"], row["digest_sent"]) == ("succeeded", False)
-
-
-def test_any_digest_error_keeps_run_succeeded(client, db, monkeypatch):
-    def boom(*a):
-        raise OSError("secret")
-
-    monkeypatch.setattr(main, "deliver", boom)
-    row = run_once(client, db, monkeypatch, ta.msg([ta.rec(1)]), ta.end())
-    assert (row["status"], row["digest_sent"]) == ("succeeded", False)
-
-
-def test_failed_run_does_not_deliver(client, db, monkeypatch, no_digest):
-    row = run_once(client, db, monkeypatch, ta.msg([], "refusal"))
-    assert row["status"] == "failed" and no_digest == []
-
-
-def test_failure_write_failing_does_not_raise(db, monkeypatch):
-    add_resume(db)
-    db.execute("INSERT INTO runs DEFAULT VALUES")
-    real, calls = main.connect, []
-
-    def flaky():
-        calls.append(1)
-        if len(calls) > 1:
-            raise psycopg.OperationalError("down")
-        return real()
-
-    def boom():
-        raise RuntimeError
-
-    monkeypatch.setattr(main, "connect", flaky)
-    monkeypatch.setattr(main, "fetch_listings", boom)
-    main.run_pipeline(1)
-    assert len(calls) == 2
-    assert db.execute("SELECT status FROM runs").fetchone()["status"] == "running"
-
-
-def test_stale_running_row_is_failed_and_new_run_starts(client, db, monkeypatch):
-    add_resume(db)
-    db.execute("INSERT INTO runs (started_at) VALUES (now() - interval '7 hours')")
-    monkeypatch.setattr(main, "fetch_listings", list)
-    use_anthropic(monkeypatch)
-    r = client.post("/runs", headers=AUTH)
-    assert r.status_code == 202 and r.json() == {"run_id": 2}
-    old = db.execute("SELECT status, error, finished_at FROM runs WHERE id = 1").fetchone()
-    assert (old["status"], old["error"]) == ("failed", "stale") and old["finished_at"]
-
-
-def test_recent_running_row_is_not_stale(client, db):
-    add_resume(db)
-    db.execute("INSERT INTO runs (started_at) VALUES (now() - interval '5 hours')")
-    assert client.post("/runs", headers=AUTH).status_code == 409
-    assert db.execute("SELECT status FROM runs").fetchone()["status"] == "running"
-
-
-def test_pipeline_failure_stores_only_class_name(client, db, monkeypatch):
-    add_resume(db)
-
-    def boom():
-        raise RuntimeError("sk-secret-value")
-
-    monkeypatch.setattr(main, "fetch_listings", boom)
-    client.post("/runs", headers=AUTH)
-    row = db.execute("SELECT status, error, finished_at FROM runs").fetchone()
-    assert row["status"] == "failed" and row["error"] == "RuntimeError" and row["finished_at"]
-    r = client.get("/runs/latest")
-    assert "error" not in r.json() and "secret" not in r.text and "RuntimeError" not in r.text
-
-
-def test_startup_marks_leftover_running_failed(db):
+def test_startup_leaves_running_row_untouched(db):
     db.execute("INSERT INTO runs DEFAULT VALUES")
     with TestClient(app):
         pass
     row = db.execute("SELECT status, error, finished_at FROM runs").fetchone()
-    assert (row["status"], row["error"]) == ("failed", "interrupted") and row["finished_at"]
+    assert (row["status"], row["error"], row["finished_at"]) == ("running", None, None)
+
+
+def test_post_runs_is_gone(client):
+    assert client.post("/runs", headers=AUTH).status_code in (404, 405)
 
 
 def test_latest_run_404_and_fields(client, db):
