@@ -50,3 +50,5 @@ CREATE TABLE IF NOT EXISTS matches (
     digested_at timestamptz,
     UNIQUE (posting_id, resume_id)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS one_running_run ON runs (status) WHERE status = 'running';
