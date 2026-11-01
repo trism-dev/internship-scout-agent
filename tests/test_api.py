@@ -335,3 +335,12 @@ def test_page_escapes_and_only_links_https(client, db):
     assert "<script>alert(1)</script>" not in text and "&lt;script&gt;alert(1)" in text
     assert 'href="https://x.com/&quot;onmouseover=&quot;a"' in text
     assert "javascript:alert" not in text and "Plain" in text
+
+
+def test_inactive_posting_leaves_page_and_matches_but_detail_stays(client, db):
+    rid = add_resume(db)
+    mid = add_match(db, rid, title="Removed Intern")
+    db.execute("UPDATE postings SET active = false")
+    assert client.get("/matches", headers=AUTH).json() == []
+    assert "Removed Intern" not in client.get("/").text
+    assert client.get(f"/matches/{mid}", headers=AUTH).status_code == 200

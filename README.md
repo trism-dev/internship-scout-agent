@@ -37,7 +37,7 @@ The scorer's tests use a mocked API. No real scoring run has happened yet, so I 
 
 ## Run locally
 
-Needs Docker. Compose starts Postgres and the app on port 8000.
+Needs Docker. Compose starts Postgres and the app on port 8000. The commands below are for bash (Git Bash or WSL on Windows).
 
 ```bash
 cp .env.example .env
@@ -115,7 +115,7 @@ Not done yet. Steps for Railway:
 3. Upload your resume with `PUT /resume`. Never commit it; `resume*` files are gitignored.
 4. In the GitHub repo add the secret `API_TOKEN` (same value) and the variable `SCOUT_URL` (the public base URL, no trailing slash). `weekly.yml` then calls `POST /runs` every Monday at 13:00 UTC and can be run by hand with workflow dispatch. It does nothing while `SCOUT_URL` is unset.
 5. Replace "Live: deploy pending." above with the URL.
-6. Optionally re-record the GIF from the real site: `API_TOKEN=... python scripts/record_demo.py --live --url https://your-url`. This needs `pip install playwright pillow` and an installed Edge or Chrome (`--channel chrome`). Without `--live` it seeds fictional sample data into the database at `DATABASE_URL` and captions the frames "Sample data".
+6. Optionally re-record the GIF from the real site: `python scripts/record_demo.py --live --url https://your-url`. It records only the public table, with no token and no Explain click, because explanations quote your resume. This needs `pip install playwright pillow` and an installed Edge or Chrome (`--channel chrome`). Without `--live` it seeds fictional sample data into a local database at `DATABASE_URL` (it refuses any other host or a database with real data) and captions the frames "Sample data".
 
 ## Data source
 

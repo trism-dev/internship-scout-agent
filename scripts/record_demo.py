@@ -6,11 +6,13 @@ No browser download: it uses an installed Edge or Chrome (--channel).
 
 Default (sample mode): seeds a fictional resume and 6 matches at fictional companies into
 DATABASE_URL, expects a server already running at --url against that same database, and
-stamps "Sample data" on every frame. Use a throwaway database, not a real one: it refuses to
-run if the database holds postings from the real feed.
---live: seeds nothing, records the real site, no caption.
+stamps "Sample data" on every frame. It refuses unless the database host is localhost or
+127.0.0.1, and unless resumes, runs and postings hold nothing but an earlier run of this
+script (those rows are deleted first, so it can be re-run). It prints the database name.
+--live: seeds nothing and records only the public table of the real site. No token and no
+Explain click, because explanations quote the resume.
 
-The bearer token is read from the API_TOKEN environment variable, never from argv.
+Sample mode reads the bearer token from the API_TOKEN environment variable, never from argv.
 """
 
 import argparse
@@ -87,17 +89,34 @@ SAMPLES = [
 
 
 def seed():
+    from urllib.parse import urlparse
+
     from psycopg.types.json import Jsonb
 
     from app.db import apply_schema, connect
 
+    url = urlparse(os.environ["DATABASE_URL"])
+    if url.hostname not in ("localhost", "127.0.0.1"):
+        sys.exit(f"Refusing to seed: database host {url.hostname!r} is not localhost or 127.0.0.1.")
+    print(f"Seeding database {url.path.lstrip('/')!r} on {url.hostname}")
     with connect() as conn:
         apply_schema(conn)
-        real = conn.execute(
-            "SELECT count(*) AS n FROM postings WHERE source <> 'sample'"
-        ).fetchone()
-        if real["n"]:
-            sys.exit("Refusing to seed: this database has postings from the real feed.")
+        # Remove an earlier run of this script, then require the database to be empty.
+        # Leaving via sys.exit inside this block rolls the deletes back.
+        conn.execute(
+            "CREATE TEMP TABLE old_runs AS SELECT DISTINCT m.run_id FROM matches m"
+            " JOIN postings p ON p.id = m.posting_id WHERE p.source = 'sample'"
+            " AND m.run_id IS NOT NULL"
+        )
+        conn.execute(
+            "DELETE FROM matches WHERE posting_id IN (SELECT id FROM postings WHERE source = 'sample')"
+        )
+        conn.execute("DELETE FROM runs WHERE id IN (SELECT run_id FROM old_runs)")
+        conn.execute("DELETE FROM postings WHERE source = 'sample'")
+        conn.execute("DELETE FROM resumes WHERE text = %s", (RESUME,))
+        for table in ("resumes", "runs", "postings", "matches"):
+            if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                sys.exit(f"Refusing to seed: {table} holds data that is not sample data.")
         rid = conn.execute(
             "INSERT INTO resumes (text) VALUES (%s) RETURNING id", (RESUME,)
         ).fetchone()["id"]
@@ -140,14 +159,18 @@ def caption(png, text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:8000")
-    ap.add_argument("--live", action="store_true", help="record the real site, seed nothing")
+    ap.add_argument(
+        "--live",
+        action="store_true",
+        help="record only the public table of the real site, seed nothing",
+    )
     ap.add_argument("--channel", default="msedge", help="msedge or chrome")
     ap.add_argument("--out", default="docs/demo.gif")
     args = ap.parse_args()
     token = os.environ.get("API_TOKEN")
-    if not token:
-        sys.exit("Set API_TOKEN in the environment.")
     if not args.live:
+        if not token:
+            sys.exit("Set API_TOKEN in the environment.")
         seed()
 
     frames, console = [], []
@@ -162,15 +185,16 @@ def main():
         page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
         page.on("pageerror", lambda e: console.append(f"pageerror: {e}"))
         page.goto(args.url)
-        page.wait_for_selector("button[data-id]")
-        snap(page, 1500)
-        page.type("#token", token, delay=80)
-        snap(page, 800)
-        buttons = page.locator("button[data-id]")
-        for i in (0, 1):
-            buttons.nth(i).click()
-            page.wait_for_selector(f"tr:nth-child({i + 1}) .x ul", timeout=10000)
-            snap(page, 2800)
+        page.wait_for_selector("h2")
+        snap(page, 3000 if args.live else 1500)
+        if not args.live:  # explanations quote the resume, so never open them on a real site
+            page.type("#token", token, delay=80)
+            snap(page, 800)
+            buttons = page.locator("button[data-id]")
+            for i in (0, 1):
+                buttons.nth(i).click()
+                page.wait_for_selector(f"tr:nth-child({i + 1}) .x ul", timeout=10000)
+                snap(page, 2800)
         browser.close()
 
     imgs = [

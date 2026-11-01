@@ -8,6 +8,4 @@ __pycache__/
 htmlcov/
 .claude/
 out/
-resume*.txt
-resume*.tex
-resume*.pdf
+resume*
