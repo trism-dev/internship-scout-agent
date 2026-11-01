@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -29,15 +30,27 @@ def fetch_listings(client=None):
     return r.json()
 
 
+def _check(x):
+    text = json.dumps(x, ensure_ascii=False, allow_nan=False)
+    text.encode()
+    if "\u0000" in text:
+        raise ValueError("NUL")
+
+
 def parse_listings(raw, now):
+    if not isinstance(raw, list):
+        raise ValueError("feed is not a list")  # noqa: TRY004
     postings, inactive_ids, skipped = [], [], 0
     cutoff = now - timedelta(days=WINDOW_DAYS)
     for e in raw:
         try:
-            if e["active"] is False:
-                inactive_ids.append(str(e["id"]))
+            if not isinstance(e["id"], str) or not e["id"]:
+                raise ValueError
+            if e["active"] is False or e.get("is_visible", True) is False:
+                _check(e["id"])
+                inactive_ids.append(e["id"])
                 continue
-            strs = [e["id"], e["company_name"], e["title"], e["url"]]
+            strs = [e["company_name"], e["title"], e["url"]]
             if (
                 e["active"] is not True
                 or not all(isinstance(s, str) and s for s in strs)
@@ -46,15 +59,7 @@ def parse_listings(raw, now):
             ):
                 raise ValueError
             posted = datetime.fromtimestamp(e["date_posted"], UTC)
-        except (KeyError, TypeError, ValueError, OverflowError, OSError):
-            skipped += 1
-            continue
-        if e.get("is_visible", True) is False or not e["url"].startswith("https://"):
-            continue
-        if posted < cutoff:
-            continue
-        postings.append(
-            {
+            posting = {
                 "external_id": e["id"],
                 "company": e["company_name"],
                 "title": e["title"],
@@ -65,7 +70,12 @@ def parse_listings(raw, now):
                 "sponsorship": e["sponsorship"] if isinstance(e.get("sponsorship"), str) else None,
                 "posted_at": posted.isoformat(),
             }
-        )
+            _check(posting)
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            skipped += 1
+            continue
+        if e["url"].startswith("https://") and posted >= cutoff:
+            postings.append(posting)
     return postings, inactive_ids, skipped
 
 

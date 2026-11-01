@@ -28,9 +28,11 @@ def entry(id, **kw):
 
 
 def test_parse_filters_and_skips():
+    no_flag = entry("noflag")
+    del no_flag["is_visible"]
     raw = [
         entry("ok"),
-        entry("noflag", is_visible=None) | {},
+        no_flag,
         entry("hidden", is_visible=False),
         entry("http", url="http://x.com"),
         entry("old", date_posted=NOW.timestamp() - 8 * 86400),
@@ -39,15 +41,51 @@ def test_parse_filters_and_skips():
         entry("baddate", date_posted="yesterday"),
         entry("boolpost", date_posted=True),
         entry("huge", date_posted=1e30),
+        entry("five", active=False) | {"id": 5},
+        entry("", active=False),
         {k: v for k, v in entry("notitle").items() if k != "title"},
         "junk",
         None,
     ]
-    del raw[1]["is_visible"]
     postings, inactive, skipped = parse_listings(raw, NOW)
     assert [p["external_id"] for p in postings] == ["ok", "noflag"]
-    assert inactive == ["gone"]
-    assert skipped == 7
+    assert inactive == ["hidden", "gone"]
+    assert skipped == 9
+
+
+def test_parse_rejects_non_list():
+    with pytest.raises(ValueError):
+        parse_listings({"a": 1}, NOW)
+
+
+def test_hostile_entries_do_not_abort_upsert(db):
+    raw = [
+        entry("good"),
+        entry("nul", title="a\x00b"),
+        entry("nulloc", locations=["x\x00"]),
+        entry("surrogate", company="\ud800"),
+        entry("nan", terms=[float("nan")]),
+        entry("inf", locations=[float("inf")]),
+        entry("nulgone\x00", active=False),
+    ]
+    postings, inactive, skipped = parse_listings(raw, NOW)
+    assert (len(postings), inactive, skipped) == (1, [], 6)
+    assert upsert_postings(db, postings, inactive) == 1
+    assert db.execute("SELECT external_id FROM postings").fetchall() == [{"external_id": "good"}]
+
+
+def test_hidden_stored_posting_goes_inactive(db):
+    postings, _, _ = parse_listings([entry("a")], NOW)
+    upsert_postings(db, postings, [])
+    postings, inactive, _ = parse_listings([entry("a", is_visible=False)], NOW)
+    assert upsert_postings(db, postings, inactive) == 0
+    assert db.execute("SELECT active FROM postings").fetchone() == {"active": False}
+
+
+def test_duplicate_ids_in_one_batch(db):
+    postings, _, _ = parse_listings([entry("a", title="first"), entry("a", title="second")], NOW)
+    assert upsert_postings(db, postings, []) == 1
+    assert db.execute("SELECT title FROM postings").fetchone() == {"title": "second"}
 
 
 def test_upsert_insert_update_and_deactivate(db):
