@@ -76,7 +76,7 @@ TOOLS = [
 ]
 
 SELECT = """
-SELECT id, company, title, locations, terms, category, sponsorship FROM postings p
+SELECT id, left(company, 200) AS company, left(title, 300) AS title, locations, terms, category, sponsorship FROM postings p
 WHERE active AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.posting_id = p.id AND m.resume_id = %s)
 ORDER BY posted_at DESC NULLS LAST, id LIMIT %s
 """
@@ -160,11 +160,16 @@ def _record(conn, ids, resume_id, run_id, args):
         raise ValueError("posting_id is not in this batch")
     if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
         raise ValueError("score must be an integer from 0 to 100")
+    reasons = [
+        {"requirement": r["requirement"][:500], "evidence": r["evidence"][:500]}
+        for r in args["reasons"][:10]
+    ]
+    gaps = [g[:300] for g in args["gaps"][:10]]
     try:
         cur = conn.execute(
             INSERT,
-            (pid, resume_id, run_id, score, args["summary"], Jsonb(args["reasons"]),
-             Jsonb(args["gaps"]), MODEL),
+            (pid, resume_id, run_id, score, args["summary"][:1000], Jsonb(reasons),
+             Jsonb(gaps), MODEL),
         )  # fmt: skip
         conn.commit()
     except psycopg.DataError as e:  # e.g. NUL in model text
@@ -236,6 +241,7 @@ def _batch(conn, client, http, system, rows, resume_id, run_id, out):
         if not missing or nudged:
             if missing:
                 log.warning("left unscored: %s", missing)
+                out["unscored"] += len(missing)
             return True
         nudged = True
         messages.append(
@@ -248,8 +254,9 @@ def _batch(conn, client, http, system, rows, resume_id, run_id, out):
 def score_postings(conn, client, resume_id, resume_text, run_id=None, http=None):
     rows = conn.execute(SELECT, (resume_id, MAX_POSTINGS)).fetchall()
     conn.commit()
-    out = {"scored": 0, "input_tokens": 0, "output_tokens": 0, "failed_batches": 0}
-    http = http or httpx.Client()
+    rows = [p | {"locations": p["locations"][:10], "terms": p["terms"][:10]} for p in rows]
+    out = {"scored": 0, "input_tokens": 0, "output_tokens": 0, "failed_batches": 0, "unscored": 0}
+    http = http or httpx.Client(trust_env=False)
     system = SYSTEM + resume_text
     for i in range(0, len(rows), BATCH_SIZE):
         try:

@@ -91,7 +91,7 @@ def test_happy_path_and_request_shape(db):
     c, reqs = client(first, msg([rec(1)], i=20, o=6, cache_read_input_tokens=5), end())
     out = score_postings(db, c, 1, "I know Rust.", run_id=None, http=web(ok_html))
     assert out == {"scored": 2, "input_tokens": 10 + 25 + 10, "output_tokens": 5 + 6 + 5,
-                   "failed_batches": 0}  # fmt: skip
+                   "failed_batches": 0, "unscored": 0}  # fmt: skip
     assert (
         db.execute("SELECT description FROM postings WHERE id = 1").fetchone()["description"]
         == "Build things"
@@ -137,6 +137,7 @@ def test_unscored_gets_one_reprompt_then_next_run_picks_it_up(db):
     c, reqs = client(msg([rec(1)]), end(), end())
     out = score_postings(db, c, 1, "r", http=web(ok_html))
     assert out["scored"] == 1 and out["failed_batches"] == 0 and len(reqs) == 3
+    assert out["unscored"] == 1
     assert "[2]" in reqs[2]["messages"][-1]["content"]
     assert set(matches(db)) == {1}
     before = matches(db)[1]["scored_at"]
@@ -257,9 +258,16 @@ def test_fetch_follows_relative_redirect_and_strips_html():
 
 
 def test_fetch_truncates_text_and_caps_body():
-    body = b"x" * (agent.MAX_BYTES + 10)
-    h = lambda r: httpx.Response(200, content=body, headers={"content-type": "text/plain"})
+    sent = []
+
+    def body():
+        for _ in range(160):  # 10 MB offered
+            sent.append(1)
+            yield b"x" * 65536
+
+    h = lambda r: httpx.Response(200, content=body(), headers={"content-type": "text/plain"})
     assert len(fetch_text(web(h), "https://example.com/")) == agent.MAX_CHARS
+    assert agent.MAX_BYTES <= len(sent) * 65536 <= agent.MAX_BYTES + 2 * 65536
 
 
 def test_fetch_refuses_non_html():
@@ -282,3 +290,22 @@ def test_invalid_url_slow_fetch_and_bool_id(db, monkeypatch):
     c, reqs = client(msg([rec(True)]), end(), end())
     score_postings(db, c, 1, "r")
     assert results(reqs[1])[0]["is_error"] is True and matches(db) == {}
+
+
+def test_feed_text_and_model_output_are_capped(db):
+    seed(db, 1)
+    db.execute(
+        "UPDATE postings SET company = repeat('c', 5000), title = repeat('t', 5000),"
+        " locations = (SELECT jsonb_agg(g) FROM generate_series(1, 30) g)"
+    )
+    reasons = [{"requirement": "r" * 900, "evidence": "e" * 900}] * 15
+    c, reqs = client(
+        msg([rec(1, summary="s" * 2000, reasons=reasons, gaps=["g" * 900] * 15)]), end()
+    )
+    score_postings(db, c, 1, "r")
+    p = json.loads(reqs[0]["messages"][0]["content"].split(chr(10), 1)[1])[0]
+    assert (len(p["company"]), len(p["title"]), len(p["locations"])) == (200, 300, 10)
+    m = matches(db)[1]
+    assert len(m["summary"]) == 1000 and len(m["reasons"]) == 10 and len(m["gaps"]) == 10
+    assert len(m["reasons"][0]["requirement"]) == len(m["reasons"][0]["evidence"]) == 500
+    assert len(m["gaps"][0]) == 300
