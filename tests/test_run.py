@@ -164,7 +164,7 @@ def test_failure_write_failing_does_not_raise(db, monkeypatch):
 
 def test_stale_running_row_is_failed_and_new_run_starts(db, monkeypatch):
     add_resume(db)
-    db.execute("INSERT INTO runs (started_at) VALUES (now() - interval '7 hours')")
+    db.execute("INSERT INTO runs (started_at) VALUES (now() - interval '5 hours')")
     monkeypatch.setattr(run, "fetch_listings", list)
     use_anthropic(monkeypatch)
     assert exit_code() == 0
@@ -175,7 +175,7 @@ def test_stale_running_row_is_failed_and_new_run_starts(db, monkeypatch):
 
 def test_recent_running_row_is_not_stale(db):
     add_resume(db)
-    db.execute("INSERT INTO runs (started_at) VALUES (now() - interval '5 hours')")
+    db.execute("INSERT INTO runs (started_at) VALUES (now() - interval '3 hours')")
     assert exit_code() == "a run is already running"
     assert db.execute("SELECT status FROM runs").fetchone()["status"] == "running"
 

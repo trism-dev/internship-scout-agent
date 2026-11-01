@@ -30,7 +30,7 @@ The scorer's tests use a mocked API. No real scoring run has happened yet, so I 
 
 - **Tool calling.** The feed has no descriptions. With tools, the model asks for a description only for postings that look promising, instead of one huge prompt with everything.
 - **Cheapest model by default.** `SCOUT_MODEL` defaults to `claude-haiku-5-5`. Change the variable if the first real run scores poorly.
-- **Manual loop.** The agent loop is a plain `while stop_reason == "tool_use"` over the Messages API, so there is no beta helper to break on an SDK upgrade.
+- **Manual loop.** The agent loop is a plain loop over the Messages API with a turn limit, so there is no beta helper to break on an SDK upgrade.
 - **Plain SQL.** psycopg and one `schema.sql` applied at startup. No ORM or migration tool until a second schema change needs one.
 - **Posting text is untrusted.** The model can only name a posting by ID from this database, never a URL. Description fetches accept public IPs over https only, with redirect and size limits, and text is capped. Tools can only read a posting and save a score, and output is HTML-escaped. A hostile posting could still try to skew its own score; nothing here prevents that.
 - **Explanations are behind a token.** The public page lists company, title and score only. An explanation quotes resume content, so it needs the bearer token.
@@ -121,7 +121,7 @@ No Vercel or Neon deploy has happened yet. The app runs on Neon (Postgres) and V
 1. Create a Neon project on the free plan. Copy both connection strings: the pooled one (the host contains `-pooler`) and the direct one.
 2. Import this repo in Vercel on the Hobby plan. Hobby is for personal, non-commercial use ([terms](https://vercel.com/docs/plans/hobby)). Vercel finds `app/main.py` and installs `requirements.txt`. Set `DATABASE_URL` to the pooled string and set `API_TOKEN`. The scoring keys are not needed on Vercel.
 3. Upload your resume with `PUT /resume`. Never commit it; `resume*` files are gitignored.
-4. In the GitHub repo add the secrets `DATABASE_URL` (the direct string), `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `DIGEST_FROM` and `DIGEST_TO`, and the variable `SCOUT_ENABLED` set to `true`. `weekly.yml` then runs every Monday at 13:00 UTC. It does nothing while `SCOUT_ENABLED` is unset. Start the first run by hand with `gh workflow run weekly.yml`.
+4. In the GitHub repo add the secrets `DATABASE_URL` (the direct string), `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `DIGEST_FROM` and `DIGEST_TO`, and the variable `SCOUT_ENABLED` set to `true`. `weekly.yml` then runs every Monday at 13:00 UTC. It does nothing while `SCOUT_ENABLED` is unset. Start the first run by hand with `gh workflow run weekly.yml`. A job that is cancelled or times out leaves its run marked as running, which blocks new runs until the 4 hour stale check clears it.
 5. Replace "Live: deploy pending." above with the Vercel URL.
 6. Optionally re-record the GIF from the real site: `python scripts/record_demo.py --live --url https://your-url`. It records only the public table, with no token and no Explain click, because explanations quote your resume. This needs `pip install playwright pillow` and an installed Edge or Chrome (`--channel chrome`). Without `--live` it seeds fictional sample data into a local database at `DATABASE_URL` (it refuses any other host or a database with real data) and captions the frames "Sample data".
 

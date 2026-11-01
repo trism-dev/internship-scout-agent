@@ -68,7 +68,7 @@ def main():
             raise SystemExit("no resume")
         conn.execute(
             "UPDATE runs SET status = 'failed', finished_at = now(), error = 'stale'"
-            " WHERE status = 'running' AND started_at < now() - interval '6 hours'"
+            " WHERE status = 'running' AND started_at < now() - interval '4 hours'"
         )
         try:
             run_id = conn.execute("INSERT INTO runs DEFAULT VALUES RETURNING id").fetchone()["id"]
