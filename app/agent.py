@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 
 log = logging.getLogger(__name__)
 
-MODEL = os.environ.get("SCOUT_MODEL", "claude-haiku-5-5")
+MODEL = os.environ.get("SCOUT_MODEL") or "claude-haiku-5-5"
 BATCH_SIZE = 25
 MAX_TURNS = 10
 MAX_POSTINGS = int(os.environ.get("SCOUT_MAX_POSTINGS", "1000"))
@@ -265,8 +265,12 @@ def score_postings(conn, client, resume_id, resume_text, run_id=None, http=None)
             )
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
             raise
-        except (anthropic.RateLimitError, anthropic.APIStatusError, anthropic.APIConnectionError):
-            log.exception("batch failed")
+        except (
+            anthropic.RateLimitError,
+            anthropic.APIStatusError,
+            anthropic.APIConnectionError,
+        ) as e:
+            log.error("batch failed: %s", type(e).__name__)
             ok = False
         out["failed_batches"] += not ok
     return out

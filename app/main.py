@@ -1,25 +1,17 @@
 import base64
 import hashlib
 import hmac
-import logging
 import os
-from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime
+from contextlib import asynccontextmanager
+from datetime import UTC
 from html import escape
 
-import anthropic
 import psycopg
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from app.agent import score_postings
 from app.db import apply_schema, connect
-from app.digest import deliver
-from app.feed import fetch_listings, parse_listings, upsert_postings
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
 
 MAX_RESUME = 50_000
 
@@ -93,11 +85,6 @@ CSP = (
 async def lifespan(app):
     with connect() as conn:
         apply_schema(conn)
-        # ponytail: single instance only; a second instance would fail the first one's live run
-        conn.execute(
-            "UPDATE runs SET status = 'failed', finished_at = now(), error = 'interrupted'"
-            " WHERE status = 'running'"
-        )
     yield
 
 
@@ -110,48 +97,6 @@ def auth(authorization: str = Header(default="")):
         raise HTTPException(503, "API_TOKEN is not configured")
     if not hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
         raise HTTPException(401, "invalid token")
-
-
-def run_pipeline(run_id):
-    try:
-        with connect() as conn:
-            resume = conn.execute("SELECT id, text FROM resumes ORDER BY id DESC LIMIT 1").fetchone()
-            postings, inactive_ids, _ = parse_listings(fetch_listings(), datetime.now(UTC))
-            new = upsert_postings(conn, postings, inactive_ids)
-            out = score_postings(
-                conn, anthropic.Anthropic(), resume["id"], resume["text"], run_id=run_id
-            )
-            if out["failed_batches"] or out["unscored"]:
-                log.warning("run %s: %s", run_id, out)
-            dead = out["failed_batches"] and not out["scored"]
-            conn.execute(
-                "UPDATE runs SET status = %s, error = %s, finished_at = now(),"
-                " postings_fetched = %s, postings_new = %s, postings_scored = %s,"
-                " input_tokens = %s, output_tokens = %s WHERE id = %s",
-                ("failed" if dead else "succeeded", "AllBatchesFailed" if dead else None,
-                 len(postings), new, out["scored"], out["input_tokens"], out["output_tokens"],
-                 run_id),
-            )  # fmt: skip
-            conn.commit()
-            if not dead:
-                try:
-                    if deliver(conn, resume["id"], out["scored"]):
-                        conn.execute("UPDATE runs SET digest_sent = true WHERE id = %s", (run_id,))
-                except Exception as e:  # noqa: BLE001 - nothing from the digest may fail a succeeded run
-                    with suppress(psycopg.Error):
-                        conn.rollback()
-                    log.error("run %s: digest failed: %s", run_id, type(e).__name__)
-    except Exception as e:
-        log.exception("run %s failed", run_id)
-        try:
-            with connect() as conn:
-                conn.execute(
-                    "UPDATE runs SET status = 'failed', finished_at = now(), error = %s"
-                    " WHERE id = %s",
-                    (type(e).__name__, run_id),
-                )
-        except psycopg.Error:
-            log.exception("run %s: could not record failure", run_id)
 
 
 class ResumeIn(BaseModel):
@@ -176,23 +121,6 @@ def put_resume(body: ResumeIn):
     with connect() as conn:
         row = conn.execute("INSERT INTO resumes (text) VALUES (%s) RETURNING id", (text,))
         return {"id": row.fetchone()["id"]}
-
-
-@app.post("/runs", status_code=202, dependencies=[Depends(auth)])
-def start_run(tasks: BackgroundTasks):
-    with connect() as conn:
-        if not conn.execute("SELECT 1 FROM resumes LIMIT 1").fetchone():
-            raise HTTPException(409, "no resume")
-        conn.execute(
-            "UPDATE runs SET status = 'failed', finished_at = now(), error = 'stale'"
-            " WHERE status = 'running' AND started_at < now() - interval '6 hours'"
-        )
-        try:
-            run_id = conn.execute("INSERT INTO runs DEFAULT VALUES RETURNING id").fetchone()["id"]
-        except psycopg.errors.UniqueViolation:
-            raise HTTPException(409, "a run is already running") from None
-    tasks.add_task(run_pipeline, run_id)
-    return {"run_id": run_id}
 
 
 def latest_run(conn):
